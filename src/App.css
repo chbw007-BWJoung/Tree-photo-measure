@@ -1,0 +1,26 @@
+* { box-sizing: border-box; }
+body { font-family: system-ui, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
+.app { max-width: 720px; margin: 0 auto; padding: calc(env(safe-area-inset-top) + 8px) 14px calc(env(safe-area-inset-bottom) + 20px); color: #f3f4f6; }
+.app-head { display: flex; align-items: center; justify-content: space-between; }
+.app-head h1 { font-size: 21px; margin: 8px 0; }
+.btn { font: inherit; font-size: 15px; padding: 9px 13px; border-radius: 10px; border: 1px solid #444; background: #262626; color: #f3f4f6;
+  text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 4px; cursor: pointer; }
+.btn.primary { background: #2e7d32; border-color: #2e7d32; color: #fff; }
+.btn.big { font-size: 19px; padding: 18px; width: 100%; }
+.btn.sm { font-size: 13px; padding: 6px 10px; }
+.main-actions { display: flex; flex-direction: column; gap: 10px; margin: 14px 0; }
+.card { background: #1b1b1b; border: 1px solid #2c2c2c; border-radius: 14px; padding: 12px; margin: 12px 0; }
+.card h2 { font-size: 16px; margin: 0 0 8px; }
+.card label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #cbd5e1; margin-bottom: 10px; }
+.app input { font: inherit; font-size: 16px; padding: 9px; border-radius: 9px; border: 1px solid #444; background: #111; color: #fff; }
+.list-head { display: flex; align-items: center; gap: 8px; }
+.list-head h2 { margin: 0 auto 0 0; }
+.list-head input { padding: 6px; font-size: 15px; }
+.table-wrap { overflow-x: auto; margin-top: 8px; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { border-bottom: 1px solid #2c2c2c; padding: 7px 4px; text-align: center; white-space: nowrap; }
+th { color: #9ca3af; font-weight: 500; font-size: 12px; }
+.banner { background: #1e3a5f; border-radius: 10px; padding: 10px 12px; margin: 8px 0; font-size: 14px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.banner.warn { background: #5b3a0e; display: block; }
+.muted { color: #9ca3af; font-size: 13px; }
+.tip { text-align: center; margin-top: 18px; }
