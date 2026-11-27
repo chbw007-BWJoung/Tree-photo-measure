@@ -1,0 +1,16 @@
+{
+  "name": "사진 수목측정",
+  "short_name": "수목측정",
+  "description": "사진으로 수고·지하고·수관폭·흉고직경을 측정해 기초현황조사표로 보냅니다",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "lang": "ko",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
