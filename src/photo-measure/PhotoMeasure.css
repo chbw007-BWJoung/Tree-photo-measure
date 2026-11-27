@@ -33,3 +33,13 @@
 .pm-nudge button{font:inherit;width:34px;height:30px;border-radius:8px;border:1px solid #444;background:#262626;color:#fff}
 .pm-actions{display:flex;gap:6px;margin-top:8px}
 .pm-actions>*{flex:1;padding:11px 6px}
+.pm-lens{display:flex;gap:6px}
+.pm-lens select{flex:1.6}
+.pm-lens input{flex:1}
+.pm-bad{border-color:#ef4444!important}
+.pm-hint{font-size:12px;color:#9ca3af;margin:6px 0 0;line-height:1.5}
+.pm-link{font:inherit;font-size:12px;background:none;border:0;color:#93c5fd;padding:2px 0;cursor:pointer;text-align:left}
+.pm-lensbox{margin-top:6px;padding:8px;border:1px solid #333;border-radius:10px;background:#1b1b1b}
+.pm-lensbox .pm-lens select,.pm-lensbox .pm-lens input{padding:7px;font-size:16px}
+.pm-redo{background:#3b2f0b;border:1px solid #a16207;color:#fde68a;border-radius:10px;padding:8px 10px;font-size:13px;line-height:1.5;margin-bottom:8px}
+.pm-root input:disabled{opacity:.6}

@@ -4,7 +4,7 @@
 // ─────────────────────────────────────────────────────────────
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  LENSES, readExif, focalPx, autoDetect, computeMeasures, breastRow, findTrunkEdges, rowForY, toPlane,
+  LENSES, readExif, deviceName, focalPx, autoDetect, computeMeasures, breastRow, findTrunkEdges, rowForY, toPlane,
 } from './core.js';
 import { readQueue, writeQueue, flushQueue as flushRows } from './queue.js';
 import './PhotoMeasure.css';
@@ -25,6 +25,15 @@ const TABLE = 'tree_measurements';
 
 const round = (v, d) => (v == null || !isFinite(v) ? null : Math.round(v * 10 ** d) / 10 ** d);
 const fmt = (v, d) => (v == null || !isFinite(v) ? '–' : v.toFixed(d));
+const getLS = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { return d; } };
+const setLS = (k, v) => { try { localStorage.setItem(k, v); } catch { /* 무시 */ } };
+const presetF35 = (id) => LENSES.find((l) => l.id === id)?.f35;
+/** 렌즈 선택값 → 35mm 환산 초점거리 */
+const resolveF35 = (sel, mm, ph) => {
+  if (sel === 'exif' && ph?.f35Exif) return ph.f35Exif;
+  if (sel === 'custom') { const v = parseFloat(mm); return v > 5 && v < 400 ? v : null; }
+  return presetF35(sel) || 24;
+};
 const isNetworkError = (err) => !navigator.onLine || /fetch|network|load failed|timed out/i.test(err?.message || '');
 
 export default function PhotoMeasure({
@@ -35,17 +44,23 @@ export default function PhotoMeasure({
   speciesList = DEFAULT_SPECIES,
   eyeHeight = 1.4,       // 촬영 높이(m) — 밑동 자동 추정에 사용
   bhHeight = 1.2,        // 흉고 높이(m)
+  initialTreeNo,         // 다시 측정할 No. (지정하면 자동 제안 대신 사용)
+  replace,               // 재측정 : { treeNo, species, prev:{height,dbh,crown_width,clear_length}, ids:[기존 id], queued:[{created_at,tree_no}] }
 }) {
   // ── 입력값 ──
   const [step, setStep] = useState('setup');
-  const [treeNo, setTreeNo] = useState('');
-  const [species, setSpecies] = useState('');
+  const [rep, setRep] = useState(replace || null);
+  const startNo = replace?.treeNo ?? initialTreeNo;
+  const [treeNo, setTreeNo] = useState(startNo ? String(startNo) : '');
+  const [species, setSpecies] = useState(replace?.species || '');
   const [dist, setDist] = useState(() => localStorage.getItem('photoMeasure.dist') || '20');
   const [pitch, setPitch] = useState('0');
   const [surface, setSurface] = useState(false);
   const [usePole, setUsePole] = useState(false);
   const [poleLen, setPoleLen] = useState('2');
-  const [f35, setF35] = useState(24);
+  const [lensSel, setLensSel] = useState(() => getLS('photoMeasure.lensSel', '24'));
+  const [customMm, setCustomMm] = useState(() => getLS('photoMeasure.customMm', ''));
+  const [showLens, setShowLens] = useState(false);
   const [photo, setPhoto] = useState(null); // { canvas, W, H, exif }
   const [pts, setPts] = useState(null);
   const [notes, setNotes] = useState([]);
@@ -55,6 +70,18 @@ export default function PhotoMeasure({
   const [savedNo, setSavedNo] = useState(null);
   const [selected, setSelected] = useState(null);
 
+  const f35 = resolveF35(lensSel, customMm, photo) || 24;
+  const f35Valid = resolveF35(lensSel, customMm, photo) !== null;
+  const device = deviceName(photo?.exif);
+  const f35Source = lensSel === 'exif' && photo?.f35Exif ? '사진 정보' : lensSel === 'custom' ? '직접 입력' : '선택값';
+
+  // 렌즈 변경 : 기본값으로 기억하고, 초점 정보가 없는 기종이면 기종별로도 기억
+  const changeLens = (sel, mm = customMm) => {
+    setLensSel(sel); setCustomMm(mm);
+    if (sel !== 'exif') { setLS('photoMeasure.lensSel', sel); setLS('photoMeasure.customMm', mm); }
+    if (device && !photo?.f35Exif && sel !== 'exif') setLS('photoMeasure.f35:' + device, JSON.stringify({ sel, mm }));
+  };
+
   const cvRef = useRef(null);
   const view = useRef({ s: 1, ox: 0, oy: 0 });
   const ptsRef = useRef(null);
@@ -63,7 +90,7 @@ export default function PhotoMeasure({
   const pinch = useRef(null);
   const raf = useRef(0);
   const camRef = useRef(null);
-  const noTouched = useRef(false);
+  const noTouched = useRef(!!startNo);
 
   const D = parseFloat(dist) || 0;
   const pitchDeg = parseFloat(pitch) || 0;
@@ -99,16 +126,25 @@ export default function PhotoMeasure({
     const on = () => flushQueue();
     window.addEventListener('online', on);
     (async () => {
-      if (!supabase) { if (!noTouched.current) setTreeNo(String(Math.max(0, ...readQueue().map((r) => r.tree_no || 0)) + 1)); return; }
+      // 1) 폰에 기억한 오늘 마지막 No.·대기열로 바로 채움 (오프라인에서도 즉시)
+      const today = new Date().toDateString();
+      let last = {};
+      try { last = JSON.parse(getLS('photoMeasure.lastNo', '{}')); } catch { /* 무시 */ }
+      const local = Math.max(last.day === today ? last.no || 0 : 0, ...readQueue().map((r) => r.tree_no || 0));
+      if (!noTouched.current) setTreeNo(String(local + 1));
+      if (!supabase) return;
+      // 2) 서버에서 오늘 최대 No. 확인 (5초 제한)
       try {
         const d0 = new Date(); d0.setHours(0, 0, 0, 0);
-        const { data } = await supabase.from(TABLE).select('tree_no')
-          .eq('archived', false).gte('created_at', d0.toISOString())
-          .not('tree_no', 'is', null).order('tree_no', { ascending: false }).limit(1);
-        const qmax = Math.max(0, ...readQueue().map((r) => r.tree_no || 0));
-        const mx = Math.max(data?.[0]?.tree_no || 0, qmax);
-        if (!noTouched.current) setTreeNo(String(mx + 1));
-      } catch { if (!noTouched.current) setTreeNo('1'); }
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 5000);
+        const { data, error } = await supabase.from(TABLE).select('tree_no')
+          .eq('archived', false).eq('deleted', false).gte('created_at', d0.toISOString())
+          .not('tree_no', 'is', null).order('tree_no', { ascending: false }).limit(1)
+          .abortSignal(ctrl.signal);
+        clearTimeout(timer);
+        if (!error && !noTouched.current) setTreeNo(String(Math.max(data?.[0]?.tree_no || 0, local) + 1));
+      } catch { /* 오프라인 : 폰에 기억한 값 유지 */ }
     })();
     return () => window.removeEventListener('online', on);
   }, [supabase, flushQueue]);
@@ -133,13 +169,21 @@ export default function PhotoMeasure({
       canvas.getContext('2d').drawImage(img, 0, 0, W, H);
       URL.revokeObjectURL(url);
       const fx = exif.focal35 && exif.focal35 > 5 && exif.focal35 < 400 ? exif.focal35 : null;
-      if (fx) setF35(fx);
       const ph = { canvas, W, H, exif, f35Exif: fx };
+      const dev = deviceName(exif);
+      // 렌즈 결정 : 사진 정보 → 이 기종에 저장해 둔 값 → 마지막 선택값
+      let sel = lensSel === 'exif' ? getLS('photoMeasure.lensSel', '24') : lensSel, mm = customMm;
+      if (fx) sel = 'exif';
+      else if (dev) {
+        try { const m = JSON.parse(getLS('photoMeasure.f35:' + dev, 'null')); if (m?.sel) { sel = m.sel; mm = m.mm || ''; } } catch { /* 무시 */ }
+      }
+      setLensSel(sel); setCustomMm(mm);
+      setShowLens(!fx);
       setPhoto(ph);
       setStep('measure');
       setSavedNo(null);
-      runDetect(ph, fx || f35);
-      setMsg(fx ? '' : '사진에 초점거리 정보가 없어 선택한 렌즈 값을 사용합니다.');
+      runDetect(ph, resolveF35(sel, mm, ph) || 24);
+      setMsg(fx ? '' : `사진에 초점거리 정보가 없습니다${dev ? ` (${dev})` : ''}. 아래 렌즈/초점거리를 확인하세요.`);
     } catch (e) {
       setMsg('사진을 열 수 없습니다. JPEG로 다시 시도해 주세요. (' + (e?.message || e) + ')');
     } finally { setBusy(false); }
@@ -380,21 +424,46 @@ export default function PhotoMeasure({
       if (!supabase) throw new Error('Supabase 클라이언트가 연결되지 않았습니다');
       const { error } = await supabase.from(TABLE).insert(row);
       if (error) throw error;
-      setMsg(`No.${row.tree_no ?? '–'} 저장 완료 — 조사표의 '📥 측정값 가져오기'에서 불러오세요.`);
+      dropQueued();
+      let text = `No.${row.tree_no ?? '–'} 저장 완료 — 조사표의 '📥 측정값 가져오기'에서 불러오세요.`;
+      if (rep?.ids?.length) {
+        // 재측정 : 새 기록 저장 후 기존 기록 삭제 → 같은 번호엔 최신 값 하나만 남음
+        const { data: gone, error: de } = await supabase.from(TABLE).delete().in('id', rep.ids).select('id');
+        text = (!de && gone?.length === rep.ids.length)
+          ? `No.${row.tree_no} 재측정 저장 — 기존 기록을 대체했습니다. 조사표에 이미 가져왔다면 '기존 값 덮어쓰기'를 체크하고 다시 가져오세요.`
+          : `No.${row.tree_no} 새 값은 저장했지만 기존 기록을 지우지 못했습니다(삭제 권한 확인: allow_delete.sql). 조사표는 최신 값을 사용합니다.`;
+      }
+      setMsg(text);
       afterSave(row);
     } catch (err) {
       if (!supabase || isNetworkError(err)) {
-        const q = [...readQueue(), row]; writeQueue(q); setPending(q.length);
+        // 측정 시각을 함께 보관 → 나중에 전송돼도 측정한 날짜로 기록됨
+        dropQueued();
+        const q = [...readQueue(), { ...row, created_at: new Date().toISOString(), ...(rep?.ids?.length ? { _replace: rep.ids } : {}) }];
+        writeQueue(q); setPending(q.length);
         setMsg(`인터넷 연결이 없어 휴대폰에 보관했습니다 (대기 ${q.length}건). 연결되면 자동 전송됩니다.`);
         afterSave(row);
       } else setMsg('저장 실패: ' + (err?.message || err));
     } finally { setBusy(false); }
   };
+  // 재측정 대상이 아직 전송 안 된(대기) 기록이면 대기열에서 뺌
+  const dropQueued = () => {
+    if (!rep?.queued?.length) return;
+    writeQueue(readQueue().filter((q) => !rep.queued.some((k) => k.created_at === q.created_at && k.tree_no === q.tree_no)));
+  };
   const afterSave = (row) => {
-    localStorage.setItem('photoMeasure.dist', dist);
+    setLS('photoMeasure.dist', dist);
     setSavedNo(row.tree_no);
     onSaved?.(row);
-    if (row.tree_no) setTreeNo(String(row.tree_no + 1));
+    // 다음 No. = 오늘 가장 큰 번호 + 1 (재측정한 번호가 중간이어도 이어서 진행)
+    let last = {};
+    try { last = JSON.parse(getLS('photoMeasure.lastNo', '{}')); } catch { /* 무시 */ }
+    const today = new Date().toDateString();
+    const lastNo = last.day === today ? last.no || 0 : 0;
+    const top = Math.max(lastNo, row.tree_no || 0);
+    if (row.tree_no) setLS('photoMeasure.lastNo', JSON.stringify({ day: today, no: top }));
+    if (top) { noTouched.current = false; setTreeNo(String(top + 1)); }
+    setRep(null);
     setSpecies('');
   };
 
@@ -411,7 +480,7 @@ export default function PhotoMeasure({
     const lines = [
       `No.${treeNo || '–'} ${species || ''}`.trim(),
       `수고 ${fmt(measures.height, 1)}m  지하고 ${fmt(measures.clear, 1)}m  수관폭 ${fmt(measures.crown, 1)}m  흉고 ${fmt(measures.dbh, 1)}cm`,
-      `거리 ${fmt(measures.Dused, 2)}m · 초점 ${f35}mm · 기울기 ${pitchDeg}° · ${new Date().toLocaleString('ko-KR')}`,
+      `${device ? device + ' · ' : ''}거리 ${fmt(measures.Dused, 2)}m · 초점 ${f35}mm(${f35Source}) · 기울기 ${pitchDeg}° · ${new Date().toLocaleString('ko-KR')}`,
     ];
     ctx.font = `${14 * sc}px system-ui, sans-serif`;
     const bh = (lines.length * 20 + 12) * sc;
@@ -427,11 +496,25 @@ export default function PhotoMeasure({
     a.href = URL.createObjectURL(file); a.download = file.name; a.click();
   };
 
-  const lensOptions = useMemo(() => {
-    const l = [...LENSES];
-    if (photo?.f35Exif && !l.some((x) => x.f35 === photo.f35Exif)) l.push({ id: 'exif', label: `사진 값 (${photo.f35Exif}mm)`, f35: photo.f35Exif });
-    return l;
-  }, [photo]);
+  const lensPicker = (
+    <div className="pm-lens">
+      <select value={lensSel === 'exif' && !photo?.f35Exif ? '24' : lensSel} onChange={(e) => changeLens(e.target.value)}>
+        {photo?.f35Exif && <option value="exif">사진 정보 {photo.f35Exif}mm (자동)</option>}
+        {LENSES.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+        <option value="custom">직접 입력 (mm)</option>
+      </select>
+      {lensSel === 'custom' && (
+        <input inputMode="decimal" placeholder="예: 23" value={customMm} aria-label="35mm 환산 초점거리"
+          className={f35Valid ? '' : 'pm-bad'} onChange={(e) => changeLens('custom', e.target.value)} />
+      )}
+    </div>
+  );
+  const lensHint = (
+    <p className="pm-hint">
+      📱 {device || '기종 정보 없음'} · 초점 {f35}mm ({f35Source})
+      {!photo?.f35Exif && <><br />사진에 초점 정보가 없으면 휴대폰 사양표의 <b>35mm 환산 초점거리</b>를 직접 입력하세요. 기종별로 기억됩니다. 모르면 <b>기준자</b>를 쓰면 정확합니다.</>}
+    </p>
+  );
 
   // ── 화면 ──
   return (
@@ -446,21 +529,24 @@ export default function PhotoMeasure({
 
       {step === 'setup' && (
         <div className="pm-setup">
+          {rep && (
+            <div className="pm-redo">
+              🔁 <b>No.{rep.treeNo} 재측정</b> — 저장하면 기존 기록을 대체합니다.
+              {rep.prev && <><br />기존: 수고 {fmt(rep.prev.height, 1)}m · 흉고 {fmt(rep.prev.dbh, 1)}cm · 수관폭 {fmt(rep.prev.crown_width, 1)}m · 지하고 {fmt(rep.prev.clear_length, 1)}m</>}
+            </div>
+          )}
           <div className="pm-grid">
-            <label>No.<input inputMode="numeric" value={treeNo} onChange={(e) => { noTouched.current = true; setTreeNo(e.target.value.replace(/\D/g, '')); }} /></label>
+            <label>No.<input inputMode="numeric" value={treeNo} disabled={!!rep} onChange={(e) => { noTouched.current = true; setTreeNo(e.target.value.replace(/\D/g, '')); }} /></label>
             <label>수종<input list="pm-species" value={species} onChange={(e) => setSpecies(e.target.value)} placeholder="선택 또는 입력" /></label>
             <datalist id="pm-species">{speciesList.map((s) => <option key={s} value={s} />)}</datalist>
             <label>줄기까지 수평거리 (m)<input inputMode="decimal" value={dist} onChange={(e) => setDist(e.target.value)} /></label>
-            <label>렌즈
-              <select value={f35} onChange={(e) => setF35(+e.target.value)}>
-                {lensOptions.map((l) => <option key={l.id} value={l.f35}>{l.label}</option>)}
-              </select>
-            </label>
+            <label>렌즈 / 초점거리 (35mm 환산){lensPicker}</label>
             <label>카메라 기울기 (°, 위로 +)<input inputMode="decimal" value={pitch} onChange={(e) => setPitch(e.target.value)} /></label>
             <label className="pm-chk"><input type="checkbox" checked={surface} onChange={(e) => setSurface(e.target.checked)} /> 거리를 줄기 표면까지 쟀음</label>
             <label className="pm-chk"><input type="checkbox" checked={usePole} onChange={(e) => setUsePole(e.target.checked)} /> 기준자 사용 (거리 대신)</label>
             {usePole && <label>기준자 길이 (m)<input inputMode="decimal" value={poleLen} onChange={(e) => setPoleLen(e.target.value)} /></label>}
           </div>
+          {photo && lensHint}
           <div className="pm-shoot">
             <label className="pm-btn pm-primary pm-big">
               📸 카메라로 촬영
@@ -493,6 +579,12 @@ export default function PhotoMeasure({
             onPointerCancel={onUp}
           />
           <div className="pm-panel">
+            {rep && (
+              <div className="pm-redo">
+                🔁 <b>No.{rep.treeNo} 재측정</b> — 저장하면 기존 기록을 대체합니다.
+                {rep.prev && <><br />기존: 수고 {fmt(rep.prev.height, 1)}m · 흉고 {fmt(rep.prev.dbh, 1)}cm · 수관폭 {fmt(rep.prev.crown_width, 1)}m · 지하고 {fmt(rep.prev.clear_length, 1)}m</>}
+              </div>
+            )}
             <div className="pm-results">
               <div><span>수고</span><b>{fmt(measures?.height, 1)}</b><i>m</i></div>
               <div><span>지하고</span><b>{fmt(measures?.clear, 1)}</b><i>m</i></div>
@@ -500,20 +592,24 @@ export default function PhotoMeasure({
               <div><span>흉고직경</span><b>{fmt(measures?.dbh, 1)}</b><i>cm</i></div>
             </div>
             <div className="pm-row">
-              <label>No.<input inputMode="numeric" value={treeNo} onChange={(e) => { noTouched.current = true; setTreeNo(e.target.value.replace(/\D/g, '')); }} /></label>
+              <label>No.<input inputMode="numeric" value={treeNo} disabled={!!rep} onChange={(e) => { noTouched.current = true; setTreeNo(e.target.value.replace(/\D/g, '')); }} /></label>
               <label>수종<input list="pm-species" value={species} onChange={(e) => setSpecies(e.target.value)} /></label>
               <label>거리m<input inputMode="decimal" value={dist} onChange={(e) => setDist(e.target.value)} disabled={measures?.method === 'pole'} /></label>
               <label>기울기°<input inputMode="decimal" value={pitch} onChange={(e) => setPitch(e.target.value)} /></label>
             </div>
             <datalist id="pm-species">{speciesList.map((s) => <option key={s} value={s} />)}</datalist>
             <div className="pm-sub">
-              {measures?.method === 'pole' ? `기준자로 계산한 거리 ${fmt(measures.Dused, 2)} m` : `초점 ${f35}mm${photo?.f35Exif ? ' (사진 정보)' : ' (선택값)'}`}
+              <button className="pm-link" onClick={() => setShowLens((v) => !v)}>
+                📱 {device || '기종 정보 없음'} · {f35}mm ({f35Source}) {showLens ? '▴' : '▾'}
+              </button>
+              {measures?.method === 'pole' && <span>기준자 거리 {fmt(measures.Dused, 2)} m</span>}
               {selected && <span className="pm-nudge">
                 {HANDLES[selected].label}
                 <button onClick={() => nudge(-1, 0)}>←</button><button onClick={() => nudge(1, 0)}>→</button>
                 <button onClick={() => nudge(0, -1)}>↑</button><button onClick={() => nudge(0, 1)}>↓</button>
               </span>}
             </div>
+            {showLens && <div className="pm-lensbox">{lensPicker}{lensHint}</div>}
             {notes.length > 0 && <p className="pm-note">⚠ {notes.join(' · ')}</p>}
             {msg && <p className="pm-msg">{msg}</p>}
             <div className="pm-actions">
